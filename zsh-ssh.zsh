@@ -6,13 +6,18 @@
 
 setopt no_beep # don't beep
 
+# Default SSH config file location
+# Can be overridden by setting SSH_CONFIG_FILE environment variable
 SSH_CONFIG_FILE="${SSH_CONFIG_FILE:-$HOME/.ssh/config}"
 
-# Parse the file and handle the include directive.
+# Function to recursively parse an SSH config file and its Include directives
+# $1: Path to the SSH config file to parse
 _parse_config_file() {
 
-  # Enable PCRE matching and handle local options
+  # Enable local PCRE regex matching
   setopt localoptions rematchpcre
+
+  # Avoids errors when a glob does not match any file
   unsetopt nomatch
 
   # Resolve the full path of the input config file
@@ -21,11 +26,12 @@ _parse_config_file() {
   # Read the file line by line
   while IFS= read -r line || [[ -n "$line" ]]; do
 
-    # Match lines starting with 'Include'
+    # Check if the line contains an 'Include' directive
     if [[ $line =~ ^[Ii]nclude[[:space:]]+(.*) ]] && (( $#match > 0 )); then
 
       # Split the rest of the line into individual paths
       local include_paths=(${(z)match[1]})
+
 
       for raw_path in "${include_paths[@]}"; do
 
@@ -42,10 +48,13 @@ _parse_config_file() {
         # Expand wildcards (e.g. *.conf) and loop over each matched file
         for include_file_path in $~expanded; do
 
+          # Check if the file exists before processing
           if [[ -f "$include_file_path" ]]; then
 
             local real_include_path
 
+            # Resolve the real path of the included file
+            # Use '-e' to ensure the file exists, otherwise continue to next iteration
             real_include_path=$(realpath -e "$include_file_path") || {
 
               continue
@@ -86,97 +95,16 @@ _ssh_host_list() {
   # Remove lines like # comment
   ssh_config=$(echo $ssh_config | command grep -v -E "^\s*#[^_]")
 
-  host_list=$(echo $ssh_config | command awk '
-    function join(array, start, end, sep, result, i) {
-      # https://www.gnu.org/software/gawk/manual/html_node/Join-Function.html
-      if (sep == "")
-        sep = " "
-      else if (sep == SUBSEP) # magic value
-        sep = ""
-      result = array[start]
-      for (i = start + 1; i <= end; i++)
-        result = result sep array[i]
-      return result
+  # Extract host entries from the SSH config
+  host_list=$(awk '
+    tolower($1) == "host"     { host=$2 }
+    tolower($1) == "hostname" { hostname=$2 }
+    tolower($1) == "user"     { user=$2 }
+    /^[[:space:]]*$/ && host && hostname {
+      print host "|" hostname "|" user
+      host=hostname=user=""
     }
-
-    function parse_line(line) {
-      n = split(line, line_array, " ")
-
-      key = line_array[1]
-      value = join(line_array, 2, n)
-
-      return key "#-#" value
-    }
-
-    function contains_star(str) {
-        return index(str, "*") > 0
-    }
-
-    function starts_or_ends_with_star(str) {
-        start_char = substr(str, 1, 1)
-        end_char = substr(str, length(str), 1)
-
-        return start_char == "*" || end_char == "*"
-    }
-
-    BEGIN {
-      IGNORECASE = 1
-      FS="\n"
-      RS=""
-
-      host_list = ""
-    }
-    {
-      match_directive = ""
-
-      # Use spaces to ensure the column command maintains the correct number of columns.
-      #   - user
-      #   - desc_formated
-
-      user = " "
-      host_name = ""
-      alias = ""
-      desc = ""
-      desc_formated = " "
-
-      for (line_num = 1; line_num <= NF; ++line_num) {
-        line = parse_line($line_num)
-
-        split(line, tmp, "#-#")
-
-        key = tolower(tmp[1])
-        value = tmp[2]
-
-        if (key == "match") { match_directive = value }
-
-        if (key == "host") { aliases = value }
-        if (key == "user") { user = value }
-        if (key == "hostname") { host_name = value }
-        if (key == "#_desc") { desc = value }
-      }
-
-      split(aliases, alias_list, " ")
-      for (i in alias_list) {
-        alias = alias_list[i]
-
-        if (!host_name && alias ) {
-          host_name = alias
-        }
-
-        if (desc) {
-          desc_formated = sprintf("[\033[00;34m%s\033[0m]", desc)
-        }
-
-        if ((host_name && !starts_or_ends_with_star(host_name)) && (alias && !starts_or_ends_with_star(alias)) && !match_directive) {
-          host = sprintf("%s|->|%s|%s|%s\n", alias, host_name, user, desc_formated)
-          host_list = host_list host
-        }
-      }
-    }
-    END {
-      print host_list
-    }
-  ')
+  ' <<< "$ssh_config")
 
   # Extract and clean command-line arguments for host filterin
   for arg in "$@"; do
@@ -238,6 +166,7 @@ _set_lbuffer() {
   result="$1"
   is_fzf_result="$2"
 
+  # Check if result is from FZF
   if [ "$is_fzf_result" = false ] ; then
 
     # Extract alias
@@ -260,6 +189,7 @@ fzf_complete_ssh() {
 
   local tokens cmd result selected_host
 
+  # Ensure local options are set for this function
   setopt localoptions noshwordsplit noksh_arrays noposixbuiltins
 
   # Split input line into words
@@ -290,11 +220,13 @@ fzf_complete_ssh() {
 
     fi
 
+    # If only one match, set it directly
     if [ $(echo $result | wc -l) -eq 1 ]; then
 
       # Auto-complete if exactly one match
       _set_lbuffer $result false
 
+      # Submit command
       zle reset-prompt
 
       # zle redisplay
@@ -320,6 +252,7 @@ fzf_complete_ssh() {
       --preview-window=right:40%
     )
 
+    # Check if a result was selected
     if [ -n "$result" ]; then
 
       # Set buffer with selected result
@@ -364,5 +297,3 @@ zle -N fzf_complete_ssh
 
 # Bind tab key to our fuzzy completion
 bindkey '^I' fzf_complete_ssh
-
-# vim: set ft=zsh sw=2 ts=2 et
